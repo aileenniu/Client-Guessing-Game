@@ -1,0 +1,156 @@
+#!/usr/bin/python3
+
+import socket
+import ssl
+import json
+import sys
+import traceback 
+
+class Client: 
+    def __init__(host, address, port, use_tls, netid):  #main
+        host.setup_connection(address, port, use_tls)
+
+        hi_message = {"type": "HI", "netid": netid}
+        host.send_message(hi_message)
+
+        aye_message = host.read_valid_message()
+        if aye_message.get("type") != "AYE":
+            raise ValueError(f"incorrect response: {aye_message.get('type')}")
+
+        min_value = aye_message["min"]
+        max_value = aye_message["max"]
+
+        flag = host.do_binary_search(min_value, max_value)
+        if not flag: 
+            raise RuntimeError("flag not retrieved")
+
+        print(flag)
+
+    def setup_connection(host, address, port, use_tls):
+        try:
+            raw_socket = socket.create_connection((address, port), timeout=30)
+            if use_tls: 
+                context = ssl.create_default_context() 
+                host.socket = context.wrap_socket(raw_socket, server_hostname=address)
+            else:
+                host.socket = raw_socket
+
+            host.socket.settimeout(30)
+            host.in_stream = host.socket.makefile("r", encoding="utf-8")
+            host.out_stream = host.socket.makefile("w", encoding="utf-8")
+
+        except ssl.SSLError as ssl_error:
+            raise
+        except socket.error as sock_error:
+            raise
+        except Exception as e:
+            raise
+
+    def read_valid_message(host):
+        try:
+            while True:
+                line = host.in_stream.readline()
+                if not line:
+                    raise ConnectionError("Server closed connection")
+                line = line.strip()
+
+                if not line:
+                    continue
+
+                try:
+                    message = json.loads(line)
+                except json.JSONDecodeError:
+                    host.send_wry()
+                    continue
+
+                if "type" not in message:
+                    host.send_wry()
+                    continue
+
+                if message["type"] == "WRY":
+                    raise ValueError("Received WRY from server.")
+                elif message["type"] in ["NIGH", "BYE", "AYE"]:
+                    return message
+                else:
+                    host.send_wry()
+        except Exception as e:
+            raise e
+
+    def do_binary_search(host, min_value, max_value):
+        MAX_GUESSES = 100
+        lower, upper = min_value, max_value
+
+        try:
+            for attempt in range(1, MAX_GUESSES + 1):
+                guess = (lower + upper) // 2
+
+                try_message = {"type": "TRY", "guess": guess}
+                host.send_message(try_message)
+
+                response = host.read_valid_message()
+                response_type = response.get("type")
+
+                if response_type == "NIGH":
+                    hint = response.get("hint", "")
+                    if hint == "too low":
+                        lower = guess + 1
+                    elif hint == "too high": 
+                        upper = guess - 1
+                    else:
+                        raise ValueError(f"hint not interpretable")
+                elif response_type == "BYE":
+                    return response.get("flag", "")
+
+            raise RuntimeError("max guesses received")
+        except Exception as e:
+            raise e
+
+    def send_message(host, message):
+        try:
+            host.out_stream.write(json.dumps(message) + "\n")
+            host.out_stream.flush()
+        except Exception as e:
+            raise e
+
+    def send_wry(host):
+        host.send_message({"type": "WRY"})
+
+if __name__ == "__main__": 
+    try:
+        DEFAULT_PORT_TCP = 49152
+        DEFAULT_PORT_TLS = 49153
+
+        port = DEFAULT_PORT_TCP
+        use_tls = False
+        hostname = None
+        netid = None 
+
+        #parse arguments
+        args = sys.argv[1:]
+        i = 0
+        while i < len(args):
+            if args[i] == "-p":
+                if i + 1 < len(args):
+                    port = int(args[i + 1])
+                    i += 1
+                else:
+                    sys.exit(1)
+            elif args[i] == "-s":
+                use_tls = True
+                port = DEFAULT_PORT_TLS
+            else:
+                if hostname is None:
+                    hostname = args[i]
+                elif netid is None:
+                    netid = args[i]
+                else:
+                    sys.exit(1)
+            i += 1
+
+        if not hostname or not netid:
+            sys.exit(1)
+
+        Client(hostname, port, use_tls, netid)
+    except Exception as e:
+        traceback.print_exc(file=sys.stderr)
+        sys.exit(1)
